@@ -1,0 +1,136 @@
+name: Render Earth 10,000 BC
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "preview = a few still frames (fast test) | full = the 15-minute video"
+        type: choice
+        options: [preview, full]
+        default: preview
+      height:
+        description: "Video height"
+        type: choice
+        options: ["720", "1080", "2160"]
+        default: "1080"
+      fps:
+        description: "Frames per second"
+        type: choice
+        options: ["24", "30", "60"]
+        default: "30"
+      chunk_seconds:
+        description: "Seconds of video per parallel job (smaller = more jobs, shorter each)"
+        default: "45"
+      crf:
+        description: "x264 quality (lower = better/bigger; 18 good, 22 for 4K to stay under 2 GB)"
+        default: "18"
+      release_tag:
+        description: "Release tag to create/update"
+        default: "earth-10000bc-v1"
+
+permissions:
+  contents: write
+
+env:
+  TEXTURE_URL: https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-blue-marble.jpg
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - id: m
+        run: echo "matrix=$(node tools/make-matrix.mjs '${{ inputs.chunk_seconds }}')" >> "$GITHUB_OUTPUT"
+
+  preview:
+    if: ${{ inputs.mode == 'preview' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Install deps + texture + ffmpeg
+        run: |
+          npm install --no-audit --no-fund
+          curl -fsSL "$TEXTURE_URL" -o public/assets/earth.jpg
+          which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+      - name: Render still frames from several shots
+        run: node tools/render.mjs --stills 10,70,125,180,300,395,520,640,750,820,885 --height ${{ inputs.height }} --outdir out/stills
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-stills
+          path: out/stills/*.jpg
+
+  render:
+    needs: setup
+    if: ${{ inputs.mode == 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Install deps + texture + ffmpeg
+        run: |
+          npm install --no-audit --no-fund
+          curl -fsSL "$TEXTURE_URL" -o public/assets/earth.jpg
+          which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+      - name: Render chunk ${{ matrix.idx }} (${{ matrix.start }}s - ${{ matrix.end }}s)
+        run: >
+          node tools/render.mjs
+          --start ${{ matrix.start }} --end ${{ matrix.end }}
+          --fps ${{ inputs.fps }} --height ${{ inputs.height }} --crf ${{ inputs.crf }}
+          --out out/chunk-${{ matrix.idx }}.mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.idx }}
+          path: out/chunk-${{ matrix.idx }}.mp4
+          retention-days: 3
+          compression-level: 0
+
+  assemble:
+    needs: render
+    if: ${{ inputs.mode == 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-*
+          path: chunks
+      - name: Generate soundtrack
+        run: node tools/gen-audio.mjs out/audio.wav
+      - name: Concatenate chunks + mux audio
+        run: |
+          ls chunks/*/chunk-*.mp4 | sort | sed "s|^|file '$PWD/|; s|$|'|" > list.txt
+          cat list.txt
+          ffmpeg -y -loglevel error -f concat -safe 0 -i list.txt -i out/audio.wav \
+            -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 256k -shortest -movflags +faststart \
+            out/Earth_10000BC_15min.mp4
+          ls -lh out/Earth_10000BC_15min.mp4
+          ffprobe -v error -show_entries format=duration -of csv=p=0 out/Earth_10000BC_15min.mp4
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/Earth_10000BC_15min.mp4 --clobber
+          else
+            gh release create "$TAG" out/Earth_10000BC_15min.mp4 \
+              --title "Earth 10,000 BC (15 min, ${{ inputs.height }}p ${{ inputs.fps }}fps)" \
+              --notes "Rendered with GitHub Actions from public/index.html."
+          fi
