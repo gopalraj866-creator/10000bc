@@ -1,0 +1,16 @@
+{
+  "name": "earth-10000bc-render",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Three.js Earth 10,000 BC simulation + headless 15-minute video renderer",
+  "scripts": {
+    "preview": "node tools/render.mjs --stills 10,125,300,520,750,885 --height 720 --outdir out/stills",
+    "render": "node tools/render.mjs --start 0 --end 900 --fps 30 --height 1080 --out out/video-silent.mp4",
+    "audio": "node tools/gen-audio.mjs out/audio.wav"
+  },
+  "dependencies": {
+    "puppeteer": "^24.0.0",
+    "three": "0.160.0"
+  }
+}
